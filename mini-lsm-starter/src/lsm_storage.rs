@@ -1,6 +1,6 @@
 #![allow(dead_code)] // REMOVE THIS LINE after fully implementing this functionality
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
@@ -30,7 +30,7 @@ pub struct LsmStorageState {
     /// The current memtable.
     pub memtable: Arc<MemTable>,
     /// Immutable memtables, from latest to earliest.
-    pub imm_memtables: VecDeque<Arc<MemTable>>,
+    pub imm_memtables: Vec<Arc<MemTable>>,
     /// L0 SSTs, from latest to earliest.
     pub l0_sstables: Vec<usize>,
     /// SsTables sorted by key range; L1 - L_max for leveled compaction, or tiers for tiered
@@ -58,7 +58,7 @@ impl LsmStorageState {
         };
         Self {
             memtable: Arc::new(MemTable::create(0)),
-            imm_memtables: VecDeque::new(),
+            imm_memtables: Vec::new(),
             l0_sstables: Vec::new(),
             levels,
             sstables: Default::default(),
@@ -366,7 +366,7 @@ impl LsmStorageInner {
         let mut guard = self.state.write();
         let mut snapshot = guard.as_ref().clone();
         let old_memtable = std::mem::replace(&mut snapshot.memtable, new_memtable);
-        snapshot.imm_memtables.push_front(old_memtable);
+        snapshot.imm_memtables.insert(0, old_memtable);
         *guard = Arc::new(snapshot);
 
         Ok(())
