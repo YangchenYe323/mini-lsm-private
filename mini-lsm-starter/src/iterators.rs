@@ -23,4 +23,6 @@ pub trait StorageIterator {
     fn num_active_iterators(&self) -> usize {
         1
     }
+
+    fn dump_state(&self) {}
 }

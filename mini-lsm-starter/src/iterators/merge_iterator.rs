@@ -1,6 +1,3 @@
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 use std::cmp::{self};
 use std::collections::BinaryHeap;
 
@@ -47,7 +44,30 @@ pub struct MergeIterator<I: StorageIterator> {
 
 impl<I: StorageIterator> MergeIterator<I> {
     pub fn create(iters: Vec<Box<I>>) -> Self {
-        unimplemented!()
+        let heap: BinaryHeap<HeapWrapper<I>> = iters
+            .into_iter()
+            .filter(|i| i.is_valid())
+            .enumerate()
+            .map(|(idx, iter)| HeapWrapper(idx, iter))
+            .collect();
+
+        let mut it = Self {
+            iters: heap,
+            current: None,
+        };
+
+        it.set_new_current();
+
+        it
+    }
+}
+
+impl<I: StorageIterator> MergeIterator<I> {
+    // Retrieve the new top iterator from the heap.
+    fn set_new_current(&mut self) {
+        if let Some(new_current) = self.iters.pop() {
+            self.current = Some(new_current);
+        };
     }
 }
 
@@ -57,18 +77,77 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
     type KeyType<'a> = KeySlice<'a>;
 
     fn key(&self) -> KeySlice {
-        unimplemented!()
+        self.current.as_ref().unwrap().1.key()
     }
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        self.current.as_ref().unwrap().1.value()
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        self.current.is_some()
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        let mut old_current = self.current.take().unwrap();
+        let current_key = old_current.1.key();
+
+        // Step 1: We have gone past the current key, so we should skip all entries with
+        // current key in all the iterators.
+        while let Some(mut it) = self.iters.pop() {
+            if it.1.key() == current_key {
+                while it.1.is_valid() && it.1.key() == current_key {
+                    match it.1.next() {
+                        Ok(()) => (),
+                        Err(e) => {
+                            // This iterator has encountered an error and is not usable,
+                            // Skip to the next one.
+                            return Err(e);
+                        }
+                    }
+                }
+                if it.1.is_valid() {
+                    self.iters.push(it);
+                }
+            } else {
+                self.iters.push(it);
+                break;
+            }
+        }
+
+        // Step 2: Skip current key in the current iterator
+        if old_current.1.is_valid() {
+            match old_current.1.next() {
+                Ok(()) => {
+                    if old_current.1.is_valid() {
+                        self.iters.push(old_current);
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        // Step 3: Find the next current iterator
+        self.set_new_current();
+
+        Ok(())
+    }
+
+    /// For test purpose only
+    fn dump_state(&self) {
+        let current = self.current.as_ref().unwrap();
+        print!(
+            "{:?}-{:?}",
+            current.1.key().for_testing_key_ref(),
+            current.1.value()
+        );
+        for it in &self.iters {
+            print!(
+                ", {:?}-{:?}",
+                it.1.key().for_testing_key_ref(),
+                it.1.value()
+            );
+        }
+        println!();
     }
 }

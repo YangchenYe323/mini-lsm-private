@@ -1,7 +1,7 @@
 mod wrapper;
 use wrapper::mini_lsm_wrapper;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use bytes::{Buf, BufMut, BytesMut};
@@ -81,7 +81,7 @@ impl MockStorage {
     pub fn new() -> Self {
         let snapshot = LsmStorageState {
             memtable: Arc::new(MemTable::create(0)),
-            imm_memtables: Vec::new(),
+            imm_memtables: VecDeque::new(),
             l0_sstables: Vec::new(),
             levels: Vec::new(),
             sstables: Default::default(),
