@@ -2,7 +2,7 @@
 
 # LSM in a Week
 
-[![CI (main)](https://github.com/skyzh/mini-lsm/actions/workflows/main.yml/badge.svg)](https://github.com/skyzh/mini-lsm/actions/workflows/main.yml)
+[![CI (main)](https://github.com/YangchenYe323/mini-lsm-private/actions/workflows/main.yml/badge.svg)](https://github.com/YangchenYe323/mini-lsm-private/actions/workflows/main.yml)
 
 Build a simple key-value storage engine in a week! And extend your LSM engine on the second + third week.
 
