@@ -81,6 +81,10 @@ impl BlockBuilder {
         }
     }
 
+    pub fn first_key(&self) -> KeySlice {
+        self.first_key.as_key_slice()
+    }
+
     fn entry_size(key: KeySlice, value: &[u8]) -> usize {
         KEY_LEN_SIZE + key.len() + VALUE_LEN_SIZE + value.len()
     }
