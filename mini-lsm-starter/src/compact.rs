@@ -145,6 +145,15 @@ impl LsmStorageInner {
     }
 
     fn trigger_flush(&self) -> Result<()> {
+        let should_flush = {
+            let snapshot = self.state.read();
+            snapshot.imm_memtables.len() + 1 > self.options.num_memtable_limit
+        };
+
+        if should_flush {
+            self.force_flush_next_imm_memtable()?;
+        }
+
         Ok(())
     }
 

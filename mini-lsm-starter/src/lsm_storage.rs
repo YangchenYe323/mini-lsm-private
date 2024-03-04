@@ -24,7 +24,7 @@ use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
 use crate::mem_table::MemTable;
 use crate::mvcc::LsmMvccInner;
-use crate::table::{SsTable, SsTableIterator};
+use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
 
@@ -159,7 +159,12 @@ impl Drop for MiniLsm {
 
 impl MiniLsm {
     pub fn close(&self) -> Result<()> {
-        unimplemented!()
+        if let Some(flush_thread) = self.flush_thread.lock().take() {
+            self.flush_notifier.send(())?;
+            flush_thread.join().unwrap();
+        }
+
+        Ok(())
     }
 
     /// Start the storage engine by either loading an existing directory or creating a new one if the directory does
@@ -394,7 +399,43 @@ impl LsmStorageInner {
 
     /// Force flush the earliest-created immutable memtable to disk
     pub fn force_flush_next_imm_memtable(&self) -> Result<()> {
-        unimplemented!()
+        let _state_guard = self.state_lock.lock();
+
+        // Step 1: Take a read lock and get a cloned reference the earliest
+        // immutable memtable
+        let next_imm_memtable = {
+            let guard = self.state.read();
+            Arc::clone(guard.imm_memtables.last().unwrap())
+        };
+
+        // Step 2: Construct SsTable on the next memtable
+        let mut builder = SsTableBuilder::new(self.options.block_size);
+        next_imm_memtable.flush(&mut builder)?;
+        let next_sst_id = self.next_sst_id();
+        let next_sst_path = self.sst_path(0, next_sst_id)?;
+        let table = builder.build(next_sst_id, Some(self.block_cache.clone()), next_sst_path)?;
+
+        // Step 3: Take a write lock and modify the state snapshot
+        let mut guard = self.state.write();
+        let mut snapshot = guard.as_ref().clone();
+        let _ = snapshot.imm_memtables.pop();
+        snapshot.sstables.insert(next_sst_id, Arc::new(table));
+        snapshot.l0_sstables.insert(0, next_sst_id);
+        *guard = Arc::new(snapshot);
+
+        Ok(())
+    }
+
+    fn sst_path(&self, level: usize, id: usize) -> Result<PathBuf> {
+        let mut path = self.path.clone();
+        path.push(format!("level_{}", level));
+        path.push(format!("sst_{}", id));
+
+        // Ensure that the directory exists
+        std::fs::create_dir_all(path.clone().parent().unwrap())?;
+        // Create SST file
+        let _ = std::fs::File::create(&path)?;
+        Ok(path)
     }
 
     pub fn new_txn(&self) -> Result<()> {
@@ -438,6 +479,12 @@ impl LsmStorageInner {
         let mut sst_iters = Vec::with_capacity(snapshot.l0_sstables.len());
         for id in &snapshot.l0_sstables {
             let table = Arc::clone(snapshot.sstables.get(id).unwrap());
+
+            // Skip SSTs that does not contain the entry we are looking for.
+            if !table.range_overlap(lower, upper) {
+                continue;
+            }
+
             let cur_sst_iter = match lower {
                 Bound::Excluded(key) => {
                     let mut iter =

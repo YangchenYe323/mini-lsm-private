@@ -6,6 +6,7 @@ mod builder;
 mod iterator;
 
 use std::fs::File;
+use std::ops::Bound;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -231,5 +232,24 @@ impl SsTable {
 
     pub fn max_ts(&self) -> u64 {
         self.max_ts
+    }
+
+    pub fn range_overlap(&self, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> bool {
+        let last_key = self.last_key.as_key_slice();
+        let first_key = self.first_key.as_key_slice();
+
+        let lower_out_of_bound = match lower {
+            Bound::Included(s) => KeySlice::from_slice(s) > last_key,
+            Bound::Excluded(s) => KeySlice::from_slice(s) >= last_key,
+            Bound::Unbounded => false,
+        };
+
+        let upper_out_of_bound = match upper {
+            Bound::Included(s) => KeySlice::from_slice(s) < first_key,
+            Bound::Excluded(s) => KeySlice::from_slice(s) <= first_key,
+            Bound::Unbounded => false,
+        };
+
+        !lower_out_of_bound && !upper_out_of_bound
     }
 }

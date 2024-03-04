@@ -88,6 +88,19 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
         self.current.is_some()
     }
 
+    fn num_active_iterators(&self) -> usize {
+        let mut num = 0;
+        if let Some(cur) = self.current.as_ref() {
+            num += cur.1.num_active_iterators();
+        }
+
+        for wrapper in &self.iters {
+            num += wrapper.1.num_active_iterators();
+        }
+
+        num
+    }
+
     fn next(&mut self) -> Result<()> {
         let mut old_current = self.current.take().unwrap();
         let current_key = old_current.1.key();
