@@ -9,7 +9,7 @@ use bytes::{BufMut, Bytes};
 
 use super::{BlockMeta, SsTable};
 use crate::{
-    block::{self, BlockBuilder},
+    block::BlockBuilder,
     key::{KeyBytes, KeySlice},
     lsm_storage::BlockCache,
     table::FileObject,

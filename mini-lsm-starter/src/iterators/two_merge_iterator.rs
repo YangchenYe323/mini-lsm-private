@@ -30,10 +30,10 @@ impl<
             (false, true) => false,
             (true, false) => true,
             (false, false) => false,
-            (true, true) => match self.a.key().cmp(&self.b.key()) {
-                std::cmp::Ordering::Equal | std::cmp::Ordering::Less => true,
-                _ => false,
-            },
+            (true, true) => matches!(
+                self.a.key().cmp(&self.b.key()),
+                std::cmp::Ordering::Equal | std::cmp::Ordering::Less
+            ),
         };
     }
 
