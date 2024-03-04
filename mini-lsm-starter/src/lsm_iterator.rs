@@ -1,30 +1,52 @@
+use std::ops::Bound;
+
 use anyhow::{anyhow, Result};
+use bytes::Bytes;
 
 use crate::{
-    iterators::{merge_iterator::MergeIterator, StorageIterator},
+    iterators::{
+        merge_iterator::MergeIterator, two_merge_iterator::TwoMergeIterator, StorageIterator,
+    },
     mem_table::MemTableIterator,
+    table::SsTableIterator,
 };
 
 /// Represents the internal type for an LSM iterator. This type will be changed across the tutorial for multiple times.
-type LsmIteratorInner = MergeIterator<MemTableIterator>;
+type LsmIteratorInner =
+    TwoMergeIterator<MergeIterator<MemTableIterator>, MergeIterator<SsTableIterator>>;
 
 pub struct LsmIterator {
     inner: LsmIteratorInner,
+    // value upper bound
+    upper: Bound<Bytes>,
 }
 
 impl LsmIterator {
-    pub(crate) fn new(iter: LsmIteratorInner) -> Result<Self> {
-        let mut it = Self { inner: iter };
+    pub(crate) fn new(iter: LsmIteratorInner, upper: Bound<&[u8]>) -> Result<Self> {
+        let upper = match upper {
+            Bound::Excluded(s) => Bound::Excluded(Bytes::copy_from_slice(s)),
+            Bound::Included(s) => Bound::Included(Bytes::copy_from_slice(s)),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        let mut it = Self { inner: iter, upper };
         it.skip_deleted()?;
         Ok(it)
     }
 
     fn skip_deleted(&mut self) -> Result<()> {
-        // println!("{:?}, {:?}", self.inner.key(), self.inner.value());
         while self.inner.is_valid() && self.inner.value().is_empty() {
             self.inner.next()?;
         }
         Ok(())
+    }
+
+    fn check_upper(&self) -> bool {
+        let key = self.key();
+        match &self.upper {
+            Bound::Included(s) => key <= s,
+            Bound::Excluded(s) => key < s,
+            Bound::Unbounded => true,
+        }
     }
 }
 
@@ -32,7 +54,7 @@ impl StorageIterator for LsmIterator {
     type KeyType<'a> = &'a [u8];
 
     fn is_valid(&self) -> bool {
-        self.inner.is_valid()
+        self.inner.is_valid() && self.check_upper()
     }
 
     fn key(&self) -> &[u8] {

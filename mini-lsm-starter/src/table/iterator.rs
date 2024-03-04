@@ -5,12 +5,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use super::{BlockMeta, SsTable};
-use crate::{
-    block::{Block, BlockIterator},
-    iterators::StorageIterator,
-    key::KeySlice,
-};
+use super::SsTable;
+use crate::{block::BlockIterator, iterators::StorageIterator, key::KeySlice};
 
 /// An iterator over the contents of an SSTable.
 pub struct SsTableIterator {
@@ -44,7 +40,7 @@ impl SsTableIterator {
     /// Create a new iterator and seek to the first key-value pair which >= `key`.
     pub fn create_and_seek_to_key(table: Arc<SsTable>, key: KeySlice) -> Result<Self> {
         let blk_idx = table.find_block_idx(key);
-        let block = table.read_block(blk_idx)?;
+        let block = table.read_block_cached(std::cmp::min(table.block_meta.len() - 1, blk_idx))?;
         let blk_iter = BlockIterator::create_and_seek_to_key(block, key);
         Ok(Self {
             table,
@@ -60,7 +56,7 @@ impl SsTableIterator {
         // Find the first block_idx whoe last_key >= key
         self.blk_idx = self.table.find_block_idx(key);
         if self.blk_idx < self.table.block_meta.len() {
-            let block = self.table.read_block(self.blk_idx)?;
+            let block = self.table.read_block_cached(self.blk_idx)?;
             let blk_iter = BlockIterator::create_and_seek_to_key(block, key);
             self.blk_iter = blk_iter;
         }
