@@ -21,16 +21,21 @@ pub struct BlockIterator {
     idx: usize,
     /// The first key in the block
     first_key: KeyVec,
+    /// The offset of the first key in the block
+    first_offset: usize,
 }
 
 impl BlockIterator {
     fn new(block: Arc<Block>) -> Self {
+        let offset = block.offsets[0] as usize;
+        let first_key = Self::first_key(&block, offset);
         Self {
             block,
             key: KeyVec::new(),
             value_range: (0, 0),
             idx: 0,
-            first_key: KeyVec::new(),
+            first_key,
+            first_offset: offset,
         }
     }
 
@@ -68,13 +73,18 @@ impl BlockIterator {
     /// Seeks to the first key in the block.
     pub fn seek_to_first(&mut self) {
         self.idx = 0;
-        self.fetch_key();
+        self.key = self.first_key.clone()
     }
 
     /// Move to the next key in the block.
     pub fn next(&mut self) {
         self.idx += 1;
-        self.fetch_key();
+        self.key = match self.block.offsets.get(self.idx) {
+            Some(offset) => {
+                Self::subsequent_key(&self.block, *offset as usize, self.first_key.as_key_slice())
+            }
+            None => KeyVec::new(),
+        };
     }
 
     /// Seek to the first key that >= `key`.
@@ -86,34 +96,66 @@ impl BlockIterator {
             .offsets
             .binary_search_by(|offset| {
                 let cur_key = self.key_at_offset(*offset as usize);
-                match cur_key.cmp(&key) {
+                match cur_key.as_key_slice().cmp(&key) {
                     std::cmp::Ordering::Equal => std::cmp::Ordering::Greater,
                     ord => ord,
                 }
             })
             .unwrap_err();
         self.idx = lower_bound;
-        self.fetch_key();
+        self.key = match self.block.offsets.get(self.idx) {
+            Some(offset) => {
+                if *offset as usize == self.first_offset {
+                    self.first_key.clone()
+                } else {
+                    Self::subsequent_key(
+                        &self.block,
+                        *offset as usize,
+                        self.first_key.as_key_slice(),
+                    )
+                }
+            }
+            None => KeyVec::new(),
+        };
     }
 
-    fn fetch_key(&mut self) {
-        match self.block.offsets.get(self.idx) {
-            Some(&offset) => self.key = self.key_at_offset(offset as usize).to_key_vec(),
-            None => self.key = KeyVec::new(),
+    fn key_at_offset(&self, offset: usize) -> KeyVec {
+        if offset == self.first_offset {
+            return self.first_key.clone();
         }
+        Self::subsequent_key(&self.block, offset, self.first_key.as_key_slice())
     }
 
-    fn key_at_offset(&self, offset: usize) -> KeySlice {
-        let mut buffer = &self.block.data[offset..];
+    fn first_key(block: &Block, offset: usize) -> KeyVec {
+        let mut buffer = &block.data[offset..];
         let key_len = buffer.get_u16() as usize;
         let key = KeySlice::from_slice(&buffer[..key_len]);
-        key
+        key.to_key_vec()
+    }
+
+    fn subsequent_key(block: &Block, offset: usize, first_key: KeySlice) -> KeyVec {
+        let mut key = Vec::new();
+        let mut buffer = &block.data[offset..];
+        let prefix_len = buffer.get_u16() as usize;
+        let rest_len = buffer.get_u16() as usize;
+        let rest = &buffer[..rest_len];
+        key.extend(&first_key.raw_ref()[..prefix_len]);
+        key.extend(rest);
+        KeyVec::from_vec(key)
     }
 
     fn value_at_offset(&self, offset: usize) -> &[u8] {
         let mut buffer = &self.block.data[offset..];
-        let key_len = buffer.get_u16() as usize;
-        let mut value_buffer = &buffer[key_len..];
+
+        let mut value_buffer = if offset == self.first_offset {
+            let key_len = buffer.get_u16() as usize;
+            &buffer[key_len..]
+        } else {
+            let _ = buffer.get_u16();
+            let rest_len = buffer.get_u16() as usize;
+            &buffer[rest_len..]
+        };
+
         let val_len = value_buffer.get_u16() as usize;
         &value_buffer[..val_len]
     }

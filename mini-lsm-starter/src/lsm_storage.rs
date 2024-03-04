@@ -1,7 +1,6 @@
 #![allow(dead_code)] // REMOVE THIS LINE after fully implementing this functionality
 
 use std::collections::HashMap;
-
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
@@ -314,16 +313,43 @@ impl LsmStorageInner {
     }
 
     fn probe_sstable(snapshot: Arc<LsmStorageState>, key: &[u8]) -> Result<Option<Bytes>> {
-        let iter = Self::scan_on_snapshot(snapshot, Bound::Included(key), Bound::Unbounded)?;
-        if !iter.is_valid() {
+        let h = farmhash::fingerprint32(key);
+        let lower = Bound::Included(key);
+        let upper = Bound::Unbounded;
+
+        // Construct sstable iterators
+        let mut sst_iters = Vec::with_capacity(snapshot.l0_sstables.len());
+        for id in &snapshot.l0_sstables {
+            let table = Arc::clone(snapshot.sstables.get(id).unwrap());
+
+            if let Some(bloom) = table.bloom.as_ref() {
+                if !bloom.may_contain(h) {
+                    continue;
+                }
+            }
+
+            // Skip SSTs that does not contain the entry we are looking for.
+            if !table.range_overlap(lower, upper) {
+                continue;
+            }
+
+            let cur_sst_iter =
+                SsTableIterator::create_and_seek_to_key(table, KeySlice::from_slice(key))?;
+
+            sst_iters.push(Box::new(cur_sst_iter));
+        }
+        let sst_iter = MergeIterator::create(sst_iters);
+
+        if !sst_iter.is_valid() {
             return Ok(None);
         }
-        let cur_key = iter.key();
-        if cur_key == key {
-            Ok(Some(Bytes::copy_from_slice(iter.value())))
-        } else {
-            Ok(None)
+
+        let cur_key = sst_iter.key();
+        if cur_key == KeySlice::from_slice(key) && !sst_iter.value().is_empty() {
+            return Ok(Some(Bytes::copy_from_slice(sst_iter.value())));
         }
+
+        Ok(None)
     }
 
     /// Write a batch of data into the storage. Implement in week 2 day 7.

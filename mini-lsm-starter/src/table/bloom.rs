@@ -79,7 +79,15 @@ impl Bloom {
         let mut filter = BytesMut::with_capacity(nbytes);
         filter.resize(nbytes, 0);
 
-        // TODO: build the bloom filter
+        for key in keys {
+            let mut h = *key;
+            let delta = (key >> 17) | (key << 15);
+            for _ in 0..k {
+                h = h.wrapping_add(delta);
+                let pos = h as usize % nbits;
+                filter.set_bit(pos, true);
+            }
+        }
 
         Self {
             filter: filter.freeze(),
@@ -96,7 +104,14 @@ impl Bloom {
             let nbits = self.filter.bit_len();
             let delta = (h >> 17) | (h << 15);
 
-            // TODO: probe the bloom filter
+            let mut h = h;
+            for _ in 0..self.k {
+                h = h.wrapping_add(delta);
+                let pos = h as usize % nbits;
+                if !self.filter.get_bit(pos) {
+                    return false;
+                }
+            }
 
             true
         }
