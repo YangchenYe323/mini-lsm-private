@@ -15,6 +15,7 @@ use crate::compact::{
     CompactionController, CompactionOptions, LeveledCompactionController, LeveledCompactionOptions,
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
+use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::iterators::StorageIterator;
@@ -340,13 +341,24 @@ impl LsmStorageInner {
         }
         let sst_iter = MergeIterator::create(sst_iters);
 
-        if !sst_iter.is_valid() {
+        // Construct l1 iterators
+        let l1_sstables = snapshot.levels[0]
+            .1
+            .iter()
+            .map(|id| snapshot.sstables.get(id).unwrap().clone())
+            .collect();
+        let l1_concat_iter =
+            SstConcatIterator::create_and_seek_to_key(l1_sstables, KeySlice::from_slice(key))?;
+
+        let iter = TwoMergeIterator::create(sst_iter, l1_concat_iter)?;
+
+        if !iter.is_valid() {
             return Ok(None);
         }
 
-        let cur_key = sst_iter.key();
-        if cur_key == KeySlice::from_slice(key) && !sst_iter.value().is_empty() {
-            return Ok(Some(Bytes::copy_from_slice(sst_iter.value())));
+        let cur_key = iter.key();
+        if cur_key == KeySlice::from_slice(key) && !iter.value().is_empty() {
+            return Ok(Some(Bytes::copy_from_slice(iter.value())));
         }
 
         Ok(None)
@@ -438,7 +450,7 @@ impl LsmStorageInner {
         let mut builder = SsTableBuilder::new(self.options.block_size);
         next_imm_memtable.flush(&mut builder)?;
         let next_sst_id = self.next_sst_id();
-        let next_sst_path = self.sst_path(0, next_sst_id)?;
+        let next_sst_path = self.sst_path(next_sst_id)?;
         let table = builder.build(next_sst_id, Some(self.block_cache.clone()), next_sst_path)?;
 
         // Step 3: Take a write lock and modify the state snapshot
@@ -452,10 +464,8 @@ impl LsmStorageInner {
         Ok(())
     }
 
-    fn sst_path(&self, level: usize, id: usize) -> Result<PathBuf> {
-        let mut path = self.path.clone();
-        path.push(format!("level_{}", level));
-        path.push(format!("sst_{}", id));
+    pub(crate) fn sst_path(&self, id: usize) -> Result<PathBuf> {
+        let path = self.path_of_sst(id);
 
         // Ensure that the directory exists
         std::fs::create_dir_all(path.clone().parent().unwrap())?;
@@ -532,6 +542,29 @@ impl LsmStorageInner {
 
         let iter = TwoMergeIterator::create(mem_iter, sst_iter)?;
 
-        Ok(FusedIterator::new(LsmIterator::new(iter, upper)?))
+        let l1_sstables = snapshot.levels[0]
+            .1
+            .iter()
+            .map(|id| snapshot.sstables.get(id).unwrap().clone())
+            .collect();
+        let concat_iter = match lower {
+            Bound::Excluded(key) => {
+                let mut iter = SstConcatIterator::create_and_seek_to_key(
+                    l1_sstables,
+                    KeySlice::from_slice(key),
+                )?;
+                if iter.is_valid() {
+                    iter.next()?;
+                }
+                iter
+            }
+            Bound::Included(key) => {
+                SstConcatIterator::create_and_seek_to_key(l1_sstables, KeySlice::from_slice(key))?
+            }
+            Bound::Unbounded => SstConcatIterator::create_and_seek_to_first(l1_sstables)?,
+        };
+
+        let lsm_iter_inner = TwoMergeIterator::create(iter, concat_iter)?;
+        Ok(FusedIterator::new(LsmIterator::new(lsm_iter_inner, upper)?))
     }
 }

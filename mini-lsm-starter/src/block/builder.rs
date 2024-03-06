@@ -97,6 +97,10 @@ impl BlockBuilder {
         }
     }
 
+    pub fn estimated_size(&self) -> usize {
+        self.data.len() + self.offsets.len() * 2
+    }
+
     pub fn first_key(&self) -> KeySlice {
         self.first_key.as_key_slice()
     }
