@@ -432,7 +432,6 @@ pub fn construct_merge_iterator_over_storage(
     }
     for (_, files) in &state.levels {
         for f in files {
-            println!("{}", f);
             iters.push(Box::new(
                 SsTableIterator::create_and_seek_to_first(state.sstables.get(f).cloned().unwrap())
                     .unwrap(),
