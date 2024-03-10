@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 pub use leveled::{LeveledCompactionController, LeveledCompactionOptions, LeveledCompactionTask};
+use parking_lot::MutexGuard;
 use serde::{Deserialize, Serialize};
 pub use simple_leveled::{
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, SimpleLeveledCompactionTask,
@@ -115,13 +116,35 @@ impl LsmStorageInner {
     fn compact(&self, task: &CompactionTask) -> Result<Vec<Arc<SsTable>>> {
         match task {
             CompactionTask::Leveled(_) => unimplemented!(),
-            CompactionTask::Tiered(_) => unimplemented!(),
+            CompactionTask::Tiered(task) => self.compact_tiered(task),
             CompactionTask::Simple(task) => self.compact_simple(task),
             CompactionTask::ForceFullCompaction {
                 l0_sstables,
                 l1_sstables,
             } => self.compact_full(l0_sstables, l1_sstables),
         }
+    }
+
+    fn compact_tiered(&self, task: &TieredCompactionTask) -> Result<Vec<Arc<SsTable>>> {
+        let snapshot = {
+            let guard = self.state.read();
+            Arc::clone(&guard)
+        };
+
+        let mut iters = Vec::with_capacity(task.tiers.len());
+
+        for (_tier_id, tier_ssts) in &task.tiers {
+            let tables = tier_ssts
+                .iter()
+                .map(|id| snapshot.sstables.get(id).unwrap().clone())
+                .collect();
+            let iter = SstConcatIterator::create_and_seek_to_first(tables)?;
+            iters.push(Box::new(iter));
+        }
+
+        let merge_iter = MergeIterator::create(iters);
+
+        self.compact_inner(merge_iter)
     }
 
     fn compact_simple(&self, task: &SimpleLeveledCompactionTask) -> Result<Vec<Arc<SsTable>>> {
@@ -314,34 +337,49 @@ impl LsmStorageInner {
         if let Some(task) = task {
             // Perform compaction outside of critical section
             let compaction_result = self.compact(&task)?;
-            let new_sst_ids: Vec<usize> = compaction_result
-                .iter()
-                .map(|table| table.sst_id())
-                .collect();
 
-            let old_snapshot = self.state.read().as_ref().clone();
-
-            let (mut new_snapshot, deleted_ssts) = self
-                .compaction_controller
-                .apply_compaction_result(&old_snapshot, &task, &new_sst_ids);
-
-            for table in compaction_result {
-                new_snapshot.sstables.insert(table.sst_id(), table);
-            }
-
-            {
-                let mut guard = self.state.write();
-                *guard = Arc::new(new_snapshot);
-            }
+            // Take the state lock here to synchronize with l0 flushing operations.
+            // We don't want the snapshot to change between this point in time and when we replace the whole snapshot
+            // after applying compaction result.
+            let guard = self.state_lock.lock();
+            let deleted_ssts = self.finish_compaction(guard, task, compaction_result)?;
 
             // Delete SST files
-            for sst_id in &deleted_ssts {
-                let path = self.path_of_sst(*sst_id);
+            for sst_id in deleted_ssts {
+                let path = self.path_of_sst(sst_id);
                 std::fs::remove_file(path)?;
             }
         }
 
         Ok(())
+    }
+
+    fn finish_compaction(
+        &self,
+        _state_lock_observer: MutexGuard<'_, ()>,
+        task: CompactionTask,
+        compaction_result: Vec<Arc<SsTable>>,
+    ) -> Result<Vec<usize>> {
+        let new_sst_ids: Vec<usize> = compaction_result
+            .iter()
+            .map(|table| table.sst_id())
+            .collect();
+        let old_snapshot = self.state.read().as_ref().clone();
+
+        let (mut new_snapshot, deleted_ssts) =
+            self.compaction_controller
+                .apply_compaction_result(&old_snapshot, &task, &new_sst_ids);
+
+        for table in compaction_result {
+            new_snapshot.sstables.insert(table.sst_id(), table);
+        }
+
+        {
+            let mut guard = self.state.write();
+            *guard = Arc::new(new_snapshot);
+        }
+
+        Ok(deleted_ssts)
     }
 
     pub(crate) fn spawn_compaction_thread(

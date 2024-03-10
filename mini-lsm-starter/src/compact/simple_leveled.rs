@@ -57,6 +57,11 @@ impl SimpleLeveledCompactionController {
                 )
             };
             if should_compact {
+                let actual_ratio_percent = ssts_next_level.len() as f64 / ssts_level.len() as f64;
+                println!(
+                    "compaction triggered at level {} and {} with size ratio {}",
+                    level, next_level, actual_ratio_percent
+                );
                 let task = SimpleLeveledCompactionTask {
                     upper_level: if level == 0 { None } else { Some(level) },
                     upper_level_sst_ids: ssts_level.clone(),
