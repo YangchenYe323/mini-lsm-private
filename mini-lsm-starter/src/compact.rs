@@ -115,13 +115,39 @@ pub enum CompactionOptions {
 impl LsmStorageInner {
     fn compact(&self, task: &CompactionTask) -> Result<Vec<Arc<SsTable>>> {
         match task {
-            CompactionTask::Leveled(_) => unimplemented!(),
+            CompactionTask::Leveled(task) => self.compact_leveled(task),
             CompactionTask::Tiered(task) => self.compact_tiered(task),
             CompactionTask::Simple(task) => self.compact_simple(task),
             CompactionTask::ForceFullCompaction {
                 l0_sstables,
                 l1_sstables,
             } => self.compact_full(l0_sstables, l1_sstables),
+        }
+    }
+
+    fn compact_leveled(&self, task: &LeveledCompactionTask) -> Result<Vec<Arc<SsTable>>> {
+        let snapshot = {
+            let guard = self.state.read();
+            Arc::clone(&guard)
+        };
+
+        match task.upper_level {
+            Some(_level) => {
+                let iter = Self::build_levels_iter(
+                    &snapshot,
+                    &task.upper_level_sst_ids,
+                    &task.lower_level_sst_ids,
+                )?;
+                self.compact_inner(iter)
+            }
+            None => {
+                let iter = Self::build_l0_and_l1_iter(
+                    &snapshot,
+                    &task.upper_level_sst_ids,
+                    &task.lower_level_sst_ids,
+                )?;
+                self.compact_inner(iter)
+            }
         }
     }
 
@@ -364,15 +390,14 @@ impl LsmStorageInner {
             .iter()
             .map(|table| table.sst_id())
             .collect();
-        let old_snapshot = self.state.read().as_ref().clone();
+        let mut old_snapshot = self.state.read().as_ref().clone();
+        for table in compaction_result {
+            old_snapshot.sstables.insert(table.sst_id(), table);
+        }
 
-        let (mut new_snapshot, deleted_ssts) =
+        let (new_snapshot, deleted_ssts) =
             self.compaction_controller
                 .apply_compaction_result(&old_snapshot, &task, &new_sst_ids);
-
-        for table in compaction_result {
-            new_snapshot.sstables.insert(table.sst_id(), table);
-        }
 
         {
             let mut guard = self.state.write();
