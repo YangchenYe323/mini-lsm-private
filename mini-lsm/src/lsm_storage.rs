@@ -364,6 +364,8 @@ impl LsmStorageInner {
                         memtables.insert(x);
                     }
                     ManifestRecord::Compaction(task, output) => {
+                        println!("{:?}", task);
+                        println!("{:?}", state.sstables.keys().collect::<Vec<_>>());
                         let (new_state, _) =
                             compaction_controller.apply_compaction_result(&state, &task, &output);
                         // TODO: apply remove again

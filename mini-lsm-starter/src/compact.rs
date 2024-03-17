@@ -22,6 +22,7 @@ use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::iterators::StorageIterator;
 use crate::key::KeySlice;
 use crate::lsm_storage::{LsmStorageInner, LsmStorageState};
+use crate::manifest::ManifestRecord;
 use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -390,14 +391,39 @@ impl LsmStorageInner {
             .iter()
             .map(|table| table.sst_id())
             .collect();
+
         let mut old_snapshot = self.state.read().as_ref().clone();
         for table in compaction_result {
             old_snapshot.sstables.insert(table.sst_id(), table);
         }
 
-        let (new_snapshot, deleted_ssts) =
+        let (mut new_snapshot, deleted_ssts) =
             self.compaction_controller
                 .apply_compaction_result(&old_snapshot, &task, &new_sst_ids);
+
+        if let CompactionTask::Leveled(leveled_task) = &task {
+            let new_lower_level_ssts = &mut new_snapshot.levels[leveled_task.lower_level - 1].1;
+            new_lower_level_ssts.sort_by(|x, y| {
+                new_snapshot
+                    .sstables
+                    .get(x)
+                    .unwrap()
+                    .first_key()
+                    .cmp(new_snapshot.sstables.get(y).unwrap().first_key())
+            });
+        }
+
+        // for id in &deleted_ssts {
+        //     assert!(new_snapshot.sstables.remove(id).is_some());
+        // }
+        self.sync_dir()?;
+
+        if let Some(manifest) = &self.manifest {
+            manifest.add_record(
+                &_state_lock_observer,
+                ManifestRecord::Compaction(task, new_sst_ids),
+            )?;
+        }
 
         {
             let mut guard = self.state.write();

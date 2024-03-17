@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use bytes::BufMut;
+use bytes::{Buf, BufMut};
 use tempfile::tempdir;
 
 use crate::{
@@ -8,7 +8,9 @@ use crate::{
         CompactionOptions, LeveledCompactionOptions, SimpleLeveledCompactionOptions,
         TieredCompactionOptions,
     },
+    iterators::StorageIterator,
     lsm_storage::{LsmStorageOptions, MiniLsm},
+    table::SsTableIterator,
     tests::harness::dump_files_in_dir,
 };
 
@@ -82,6 +84,34 @@ fn test_multiple_compacted_ssts_leveled() {
     assert!(storage.inner.state.read().imm_memtables.is_empty());
 
     storage.dump_structure();
+    let l0_ssts = storage.inner.state.read().l0_sstables.clone();
+    let l0_ssts: Vec<_> = l0_ssts
+        .into_iter()
+        .map(|table_id| {
+            storage
+                .inner
+                .state
+                .read()
+                .sstables
+                .get(&table_id)
+                .unwrap()
+                .clone()
+        })
+        .collect();
+    for table in l0_ssts {
+        let id = table.sst_id();
+        let mut iterator = SsTableIterator::create_and_seek_to_first(table).unwrap();
+        let mut keys = vec![];
+        while iterator.is_valid() {
+            let key = iterator.key().raw_ref();
+            let mut buf = &key[key.len() - 4..];
+            let key = buf.get_i32();
+            keys.push(key);
+            iterator.next().unwrap();
+        }
+        println!("{}: {:?}", id, keys);
+    }
+
     drop(storage);
     dump_files_in_dir(&dir);
 

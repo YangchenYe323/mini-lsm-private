@@ -243,12 +243,6 @@ impl LeveledCompactionController {
         new_snapshot.levels[task.lower_level - 1]
             .1
             .extend(output.iter().copied());
-        new_snapshot.levels[task.lower_level - 1]
-            .1
-            .sort_by_key(|id| {
-                let table = snapshot.sstables.get(id).unwrap();
-                table.first_key()
-            });
 
         (new_snapshot, removed_ssts)
     }
