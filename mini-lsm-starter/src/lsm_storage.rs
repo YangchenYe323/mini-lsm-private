@@ -61,6 +61,7 @@ impl LsmStorageState {
             CompactionOptions::Tiered(_) => Vec::new(),
             CompactionOptions::NoCompaction => vec![(1, Vec::new())],
         };
+
         Self {
             memtable: Arc::new(MemTable::create(0)),
             imm_memtables: Vec::new(),
@@ -292,6 +293,12 @@ impl LsmStorageInner {
         let manifest = if !manifest_path.exists() {
             // Starting afresh
             let manifest = Manifest::create(&manifest_path)?;
+            if options.enable_wal {
+                state.memtable = Arc::new(MemTable::create_with_wal(
+                    next_sst_id,
+                    Self::path_of_wal_static(path, next_sst_id),
+                )?);
+            }
             manifest.add_record_when_init(ManifestRecord::NewMemtable(next_sst_id))?;
             next_sst_id += 1;
             manifest
@@ -353,11 +360,9 @@ impl LsmStorageInner {
                 let num_immutable_memtables = memtable_ids.len() - 1;
                 let mut immutable_memtables = Vec::with_capacity(num_immutable_memtables);
                 for &immutable_memtable_id in memtable_ids.iter().take(num_immutable_memtables) {
-                    println!("Loading memtable {}", immutable_memtable_id);
                     let wal_path = Self::path_of_wal_static(path, immutable_memtable_id);
                     let table = MemTable::recover_from_wal(immutable_memtable_id, wal_path)?;
                     immutable_memtables.insert(0, Arc::new(table));
-                    println!("Loaded memtable {}", immutable_memtable_id);
                 }
                 let memtable_id = *memtable_ids.last().unwrap();
                 let memtable = MemTable::recover_from_wal(
