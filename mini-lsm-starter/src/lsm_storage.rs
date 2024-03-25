@@ -1,6 +1,6 @@
 #![allow(dead_code)] // REMOVE THIS LINE after fully implementing this functionality
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
@@ -169,14 +169,18 @@ impl MiniLsm {
             compaction_thread.join().unwrap();
         }
 
-        // Flush all memtables
-        if !self.inner.state.read().memtable.is_empty() {
-            let _state_lock = self.inner.state_lock.lock();
-            self.inner.force_freeze_memtable(&_state_lock)?;
-        }
+        if self.inner.options.enable_wal {
+            self.sync()?;
+        } else {
+            // Flush all memtables
+            if !self.inner.state.read().memtable.is_empty() {
+                let _state_lock = self.inner.state_lock.lock();
+                self.inner.force_freeze_memtable(&_state_lock)?;
+            }
 
-        while !self.inner.state.read().imm_memtables.is_empty() {
-            self.inner.force_flush_next_imm_memtable()?;
+            while !self.inner.state.read().imm_memtables.is_empty() {
+                self.inner.force_flush_next_imm_memtable()?;
+            }
         }
 
         Ok(())
@@ -292,10 +296,14 @@ impl LsmStorageInner {
             next_sst_id += 1;
             manifest
         } else {
+            let mut memtable_ids: BTreeSet<usize> = BTreeSet::new();
             let (manifest, records) = Manifest::recover(&manifest_path)?;
+            // Recover SST states from manifest
             for record in records {
                 match record {
                     ManifestRecord::Flush(id) => {
+                        let memtable_flushed = memtable_ids.remove(&id);
+                        assert!(memtable_flushed, "Flushing non-existent memtable {}", id);
                         if compaction_controller.flush_to_l0() {
                             state.l0_sstables.insert(0, id);
                         } else {
@@ -304,6 +312,8 @@ impl LsmStorageInner {
                         next_sst_id = next_sst_id.max(id + 1);
                     }
                     ManifestRecord::NewMemtable(id) => {
+                        let memtable_not_exists = memtable_ids.insert(id);
+                        assert!(memtable_not_exists, "Adding existing memtable {}", id);
                         next_sst_id = next_sst_id.max(id + 1);
                     }
                     ManifestRecord::Compaction(task, output) => {
@@ -319,7 +329,7 @@ impl LsmStorageInner {
             for &sst_id in state
                 .l0_sstables
                 .iter()
-                .chain(state.levels.iter().flat_map(|(_id, ssts)| ssts.into_iter()))
+                .chain(state.levels.iter().flat_map(|(_id, ssts)| ssts.iter()))
             {
                 let sst_path = Self::path_of_sst_static(path, sst_id);
                 let table = SsTable::open(
@@ -339,9 +349,27 @@ impl LsmStorageInner {
             }
 
             // Recover memtable
-            state.memtable = Arc::new(MemTable::create(next_sst_id));
-            next_sst_id += 1;
-            manifest.add_record_when_init(ManifestRecord::NewMemtable(next_sst_id))?;
+            if options.enable_wal {
+                let num_immutable_memtables = memtable_ids.len() - 1;
+                let mut immutable_memtables = Vec::with_capacity(num_immutable_memtables);
+                for &immutable_memtable_id in memtable_ids.iter().take(num_immutable_memtables) {
+                    let wal_path = Self::path_of_wal_static(path, immutable_memtable_id);
+                    let table = MemTable::recover_from_wal(immutable_memtable_id, wal_path)?;
+                    immutable_memtables.insert(0, Arc::new(table));
+                }
+                let memtable_id = *memtable_ids.last().unwrap();
+                let memtable = MemTable::recover_from_wal(
+                    memtable_id,
+                    Self::path_of_wal_static(path, memtable_id),
+                )?;
+                next_sst_id += 1;
+                state.memtable = Arc::new(memtable);
+                state.imm_memtables = immutable_memtables;
+            } else {
+                state.memtable = Arc::new(MemTable::create(next_sst_id));
+                next_sst_id += 1;
+                manifest.add_record_when_init(ManifestRecord::NewMemtable(next_sst_id))?;
+            }
 
             manifest
         };
@@ -363,7 +391,7 @@ impl LsmStorageInner {
     }
 
     pub fn sync(&self) -> Result<()> {
-        unimplemented!()
+        self.state.read().memtable.sync_wal()
     }
 
     pub fn add_compaction_filter(&self, compaction_filter: CompactionFilter) {
@@ -514,7 +542,14 @@ impl LsmStorageInner {
     /// Force freeze the current memtable to an immutable memtable
     pub fn force_freeze_memtable(&self, _state_lock_observer: &MutexGuard<'_, ()>) -> Result<()> {
         let new_memtable_id = self.next_sst_id();
-        let new_memtable = Arc::new(MemTable::create(new_memtable_id));
+        let new_memtable = if self.options.enable_wal {
+            Arc::new(MemTable::create_with_wal(
+                new_memtable_id,
+                self.path_of_wal(new_memtable_id),
+            )?)
+        } else {
+            Arc::new(MemTable::create(new_memtable_id))
+        };
 
         let mut guard = self.state.write();
         let mut snapshot = guard.as_ref().clone();
@@ -547,25 +582,33 @@ impl LsmStorageInner {
         // Step 2: Construct SsTable on the next memtable
         let mut builder = SsTableBuilder::new(self.options.block_size);
         next_imm_memtable.flush(&mut builder)?;
-        let next_sst_id = self.next_sst_id();
-        let next_sst_path = self.sst_path(next_sst_id)?;
-        let table = builder.build(next_sst_id, Some(self.block_cache.clone()), next_sst_path)?;
+        let next_memtable_sst_id = next_imm_memtable.id();
+        let next_sst_path = self.sst_path(next_memtable_sst_id)?;
+        let table = builder.build(
+            next_memtable_sst_id,
+            Some(self.block_cache.clone()),
+            next_sst_path,
+        )?;
 
         // Step 3: Take a write lock and modify the state snapshot
         let mut guard = self.state.write();
         let mut snapshot = guard.as_ref().clone();
         let _ = snapshot.imm_memtables.pop();
-        snapshot.sstables.insert(next_sst_id, Arc::new(table));
+        snapshot
+            .sstables
+            .insert(next_memtable_sst_id, Arc::new(table));
 
         if self.compaction_controller.flush_to_l0() {
-            snapshot.l0_sstables.insert(0, next_sst_id);
+            snapshot.l0_sstables.insert(0, next_memtable_sst_id);
         } else {
-            snapshot.levels.insert(0, (next_sst_id, vec![next_sst_id]));
+            snapshot
+                .levels
+                .insert(0, (next_memtable_sst_id, vec![next_memtable_sst_id]));
         }
 
         // Update manifest
         if let Some(manifest) = self.manifest.as_ref() {
-            let record = ManifestRecord::Flush(next_sst_id);
+            let record = ManifestRecord::Flush(next_memtable_sst_id);
             manifest.add_record(&_state_guard, record)?;
         }
 

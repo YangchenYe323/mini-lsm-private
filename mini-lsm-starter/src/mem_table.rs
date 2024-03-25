@@ -57,8 +57,16 @@ impl MemTable {
     }
 
     /// Create a memtable from WAL
-    pub fn recover_from_wal(_id: usize, _path: impl AsRef<Path>) -> Result<Self> {
-        unimplemented!()
+    pub fn recover_from_wal(id: usize, path: impl AsRef<Path>) -> Result<Self> {
+        let map = SkipMap::new();
+        let wal = Wal::recover(path, &map)?;
+        let size = AtomicUsize::new(map.len());
+        Ok(Self {
+            id,
+            map: Arc::new(map),
+            wal: Some(wal),
+            approximate_size: Arc::new(size),
+        })
     }
 
     pub fn for_testing_put_slice(&self, key: &[u8], value: &[u8]) -> Result<()> {
@@ -87,6 +95,9 @@ impl MemTable {
     /// In week 1, day 1, simply put the key-value pair into the skipmap.
     /// In week 2, day 6, also flush the data to WAL.
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        if let Some(wal) = self.wal.as_ref() {
+            wal.put(key, value)?;
+        }
         self.map
             .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
         self.approximate_size
