@@ -26,10 +26,18 @@ impl Wal {
         let content = std::fs::read(path.as_ref())?;
         let mut buf = &content[..];
         while buf.remaining() > 0 {
+            let old_buf = buf;
             let key_len = buf.get_u32();
             let key = buf.copy_to_bytes(key_len as usize);
             let value_len = buf.get_u32();
             let value = buf.copy_to_bytes(value_len as usize);
+            let checksum = buf.get_u32();
+            let actual_checksum = crc32fast::hash(&old_buf[..(key_len + value_len + 8) as usize]);
+            assert_eq!(
+                checksum, actual_checksum,
+                "WAL checksum mismatch: {} != {}",
+                checksum, actual_checksum
+            );
             skiplist.insert(key, value);
         }
 
@@ -46,6 +54,8 @@ impl Wal {
         buf.put_slice(key);
         buf.put_u32(value.len() as u32);
         buf.put_slice(value);
+        let checksum = crc32fast::hash(&buf);
+        buf.put_u32(checksum);
 
         let mut guard = self.file.lock();
         guard.write_all(&buf)?;
