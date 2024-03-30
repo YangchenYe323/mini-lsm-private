@@ -1,11 +1,13 @@
 #![allow(dead_code)] // REMOVE THIS LINE after fully implementing this functionality
 
+use std::fs::File;
 use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
-use std::{fs::File, ops::DerefMut};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+use bytes::{Buf, BufMut};
 use parking_lot::{Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
 
@@ -35,11 +37,24 @@ impl Manifest {
             .append(true)
             .read(true)
             .open(path.as_ref())?;
-
+        let buffer = std::fs::read(path.as_ref())?;
+        let mut buf = &buffer[..];
         let mut records = Vec::new();
-        for result in serde_json::Deserializer::from_reader(&file).into_iter() {
-            let record = result?;
+        while buf.remaining() > 0 {
+            let length = buf.get_u32();
+            let record_buffer = &buf[..length as usize];
+            let mut checksum_buffer = &buf[length as usize..length as usize + 4];
+            let checksum = checksum_buffer.get_u32();
+            let actual_checksum = crc32fast::hash(record_buffer);
+            assert_eq!(
+                checksum, actual_checksum,
+                "Manifest checksum mismatch: {} != {}",
+                checksum, actual_checksum
+            );
+
+            let record = serde_json::from_slice(record_buffer)?;
             records.push(record);
+            buf.advance(length as usize + 4);
         }
 
         Ok((
@@ -59,9 +74,17 @@ impl Manifest {
     }
 
     pub fn add_record_when_init(&self, record: ManifestRecord) -> Result<()> {
+        let mut buffer = serde_json::to_vec(&record)?;
+        let length = buffer.len();
+        let checksum = crc32fast::hash(&buffer);
+
+        let mut buf = Vec::with_capacity(buffer.len() + 8);
+        buf.put_u32(length as u32);
+        buf.append(&mut buffer);
+        buf.put_u32(checksum);
+
         let mut guard = self.file.lock();
-        serde_json::to_writer(guard.deref_mut(), &record)
-            .context("Failed to write manifest record")?;
+        guard.write_all(&buf)?;
         Ok(())
     }
 }
