@@ -196,7 +196,19 @@ impl SsTable {
         };
         let block_len = (next_offset - offset) as u64;
         let block_buffer = self.file.read(offset as u64, block_len)?;
-        let block = Block::decode(&block_buffer);
+        let block_data_buffer = &block_buffer[..block_len as usize - 4];
+        let mut block_checksum_buffer = &block_buffer[block_len as usize - 4..];
+        let block_checksum = block_checksum_buffer.get_u32();
+        // Verify checksum
+        let actual_checksum = crc32fast::hash(block_data_buffer);
+
+        assert_eq!(
+            block_checksum, actual_checksum,
+            "Block checksum mismatch: {} != {}",
+            block_checksum, actual_checksum
+        );
+
+        let block = Block::decode(block_data_buffer);
         Ok(Arc::new(block))
     }
 

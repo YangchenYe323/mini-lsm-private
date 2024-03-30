@@ -81,8 +81,13 @@ impl SsTableBuilder {
         let old_first_key = old_builder.first_key().raw_ref().to_vec();
         let old_last_key = self.last_key.clone();
         let old_block = old_builder.build();
+        let old_block_bytes = old_block.encode();
+
+        let old_block_checksum = crc32fast::hash(&old_block_bytes);
 
         self.data.put(old_block.encode());
+        self.data.put_u32(old_block_checksum);
+
         self.meta.push(BlockMeta {
             offset: old_offset,
             first_key: KeyBytes::from_bytes(Bytes::from(old_first_key)),
