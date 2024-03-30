@@ -131,13 +131,23 @@ impl SsTableBuilder {
             Bloom::bloom_bits_per_key(key_hashes.len(), 0.01),
         );
 
+        // Step 1: Buffer starts with data section
         let mut buffer = data;
+
+        // Step 2: Encode blockmeta
         let meta_offset = buffer.len();
         BlockMeta::encode_block_meta(&meta, &mut buffer);
+        let meta_buffer = &buffer[meta_offset..];
+        let meta_checksum = crc32fast::hash(meta_buffer);
+        buffer.put_u32(meta_checksum);
         buffer.put_u32(meta_offset as u32);
-        // Encode bloom filter
+
+        // Step 3: Encode bloom filter
         let bloom_offset = buffer.len();
         bloom.encode(&mut buffer);
+        let bloom_buffer = &buffer[bloom_offset..];
+        let bloom_checksum = crc32fast::hash(bloom_buffer);
+        buffer.put_u32(bloom_checksum);
         buffer.put_u32(bloom_offset as u32);
 
         let file_object = FileObject::create(path.as_ref(), buffer)?;

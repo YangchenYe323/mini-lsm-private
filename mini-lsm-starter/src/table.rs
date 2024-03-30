@@ -132,15 +132,23 @@ impl SsTable {
             file_size - std::mem::size_of::<u32>() as u64,
             std::mem::size_of::<u32>() as u64,
         )?;
-
         let bloom_offset = bloom_offset.as_slice().get_u32() as u64;
-
         let bloom_buffer = file.read(
             bloom_offset,
             file_size - bloom_offset - std::mem::size_of::<u32>() as u64,
         )?;
-        let bloom = Bloom::decode(&bloom_buffer)?;
+        let (bloom_data_buffer, mut bloom_checksum_buffer) =
+            bloom_buffer.split_at(bloom_buffer.len() - 4);
+        let expected_bloom_checksum = bloom_checksum_buffer.get_u32();
+        let actual_bloom_checksum = crc32fast::hash(bloom_data_buffer);
+        assert_eq!(
+            expected_bloom_checksum, actual_bloom_checksum,
+            "Bloom buffer checksum mismatch {} != {}",
+            expected_bloom_checksum, actual_bloom_checksum
+        );
+        let bloom = Bloom::decode(bloom_data_buffer)?;
 
+        // Step 2: Read block meta
         let block_meta_offset = file.read(
             bloom_offset - std::mem::size_of::<u32>() as u64,
             std::mem::size_of::<u32>() as u64,
@@ -150,7 +158,16 @@ impl SsTable {
             block_meta_offset,
             bloom_offset - block_meta_offset - std::mem::size_of::<u32>() as u64,
         )?;
-        let block_meta = BlockMeta::decode_block_meta(&block_meta_buffer[..]);
+        let (block_meta_data_buffer, mut block_meta_checksum_buffer) =
+            block_meta_buffer.split_at(block_meta_buffer.len() - 4);
+        let expected_block_meta_checksum = block_meta_checksum_buffer.get_u32();
+        let actual_block_meta_checksum = crc32fast::hash(block_meta_data_buffer);
+        assert_eq!(
+            expected_block_meta_checksum, actual_block_meta_checksum,
+            "Block meta checksum mismatch {} != {}",
+            expected_block_meta_checksum, actual_block_meta_checksum
+        );
+        let block_meta = BlockMeta::decode_block_meta(block_meta_data_buffer);
         let first_key = block_meta.first().unwrap().first_key.clone();
         let last_key = block_meta.last().unwrap().last_key.clone();
 
