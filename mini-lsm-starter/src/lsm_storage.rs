@@ -488,27 +488,39 @@ impl LsmStorageInner {
     }
 
     /// Write a batch of data into the storage. Implement in week 2 day 7.
-    pub fn write_batch<T: AsRef<[u8]>>(&self, _batch: &[WriteBatchRecord<T>]) -> Result<()> {
-        unimplemented!()
-    }
-
-    /// Put a key-value pair into the storage by writing into the current memtable.
-    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        let size = {
-            let guard = self.state.write();
-            let _ = guard.memtable.put(key, value);
-            guard.memtable.approximate_size()
-        };
-
-        self.try_freeze(size)?;
+    pub fn write_batch<T: AsRef<[u8]>>(&self, batch: &[WriteBatchRecord<T>]) -> Result<()> {
+        for record in batch {
+            match record {
+                WriteBatchRecord::Put(key, value) => {
+                    let size = {
+                        let guard = self.state.write();
+                        let _ = guard.memtable.put(key.as_ref(), value.as_ref());
+                        guard.memtable.approximate_size()
+                    };
+                    self.try_freeze(size)?;
+                }
+                WriteBatchRecord::Del(key) => {
+                    let size = {
+                        let guard = self.state.write();
+                        let _ = guard.memtable.put(key.as_ref(), &[]);
+                        guard.memtable.approximate_size()
+                    };
+                    self.try_freeze(size)?;
+                }
+            }
+        }
 
         Ok(())
     }
 
+    /// Put a key-value pair into the storage by writing into the current memtable.
+    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.write_batch(&[WriteBatchRecord::Put(key, value)])
+    }
+
     /// Remove a key from the storage by writing an empty value.
     pub fn delete(&self, key: &[u8]) -> Result<()> {
-        const EMPTY_VALUE: &[u8] = &[];
-        self.put(key, EMPTY_VALUE)
+        self.write_batch(&[WriteBatchRecord::Del(key)])
     }
 
     /// Try freeze memtable.
