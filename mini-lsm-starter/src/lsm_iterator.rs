@@ -8,6 +8,7 @@ use crate::{
         concat_iterator::SstConcatIterator, merge_iterator::MergeIterator,
         two_merge_iterator::TwoMergeIterator, StorageIterator,
     },
+    key::KeyVec,
     mem_table::MemTableIterator,
     table::SsTableIterator,
 };
@@ -20,6 +21,7 @@ type LsmIteratorInner = TwoMergeIterator<
 
 pub struct LsmIterator {
     inner: LsmIteratorInner,
+    current_key: KeyVec,
     // value upper bound
     upper: Bound<Bytes>,
 }
@@ -31,8 +33,16 @@ impl LsmIterator {
             Bound::Included(s) => Bound::Included(Bytes::copy_from_slice(s)),
             Bound::Unbounded => Bound::Unbounded,
         };
-        let mut it = Self { inner: iter, upper };
+
+        let mut it = Self {
+            inner: iter,
+            current_key: KeyVec::new(),
+            upper,
+        };
+
         it.skip_deleted()?;
+        it.fetch_current_key();
+
         Ok(it)
     }
 
@@ -51,6 +61,13 @@ impl LsmIterator {
             Bound::Unbounded => true,
         }
     }
+
+    fn fetch_current_key(&mut self) {
+        if self.inner.is_valid() {
+            self.current_key.clear();
+            self.current_key = self.inner.key().to_key_vec();
+        }
+    }
 }
 
 impl StorageIterator for LsmIterator {
@@ -61,7 +78,7 @@ impl StorageIterator for LsmIterator {
     }
 
     fn key(&self) -> &[u8] {
-        self.inner.key().raw_ref()
+        self.current_key.key_ref()
     }
 
     fn value(&self) -> &[u8] {
@@ -71,6 +88,7 @@ impl StorageIterator for LsmIterator {
     fn next(&mut self) -> Result<()> {
         self.inner.next()?;
         self.skip_deleted()?;
+        self.fetch_current_key();
         Ok(())
     }
 

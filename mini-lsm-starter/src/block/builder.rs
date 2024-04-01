@@ -72,16 +72,18 @@ impl BlockBuilder {
     }
 
     fn put_first_key(&mut self, key: KeySlice) {
-        self.data.put_u16(key.len() as u16);
-        self.data.put_slice(key.raw_ref());
+        self.data.put_u16(key.key_len() as u16);
+        self.data.put_slice(key.key_ref());
+        self.data.put_u64(key.ts());
     }
 
     fn put_subsequent_key(&mut self, key: KeySlice) {
-        let matching_prefix_len = mismatch(key.raw_ref(), self.first_key.raw_ref());
-        let rest_len = key.raw_ref().len() - matching_prefix_len;
+        let matching_prefix_len = mismatch(key.key_ref(), self.first_key.key_ref());
+        let rest_len = key.key_ref().len() - matching_prefix_len;
         self.data.put_u16(matching_prefix_len as u16);
         self.data.put_u16(rest_len as u16);
-        self.data.put_slice(&key.raw_ref()[matching_prefix_len..]);
+        self.data.put_slice(&key.key_ref()[matching_prefix_len..]);
+        self.data.put_u64(key.ts());
     }
 
     /// Check if there is no key-value pair in the block.
@@ -106,7 +108,7 @@ impl BlockBuilder {
     }
 
     fn entry_size(key: KeySlice, value: &[u8]) -> usize {
-        KEY_LEN_SIZE + key.len() + VALUE_LEN_SIZE + value.len()
+        KEY_LEN_SIZE + key.raw_len() + VALUE_LEN_SIZE + value.len()
     }
 
     fn would_be_full_after_entry(&self, entry_size: usize) -> bool {

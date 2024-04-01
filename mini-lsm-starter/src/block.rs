@@ -41,9 +41,9 @@ impl Block {
         let num_element = (&data[num_element_start..]).get_u16();
         let mut offset_start = 0;
 
-        // Skip first key
+        // Skip first key: KEY_LEN + KEY + TIMESTAMP
         let first_key_len = (&data[offset_start..offset_start + KEY_LEN_SIZE]).get_u16();
-        offset_start += KEY_LEN_SIZE + first_key_len as usize;
+        offset_start += KEY_LEN_SIZE + first_key_len as usize + 8;
         // Skip first value
         let first_val_len = (&data[offset_start..offset_start + VALUE_LEN_SIZE]).get_u16();
         offset_start += VALUE_LEN_SIZE + first_val_len as usize;
@@ -52,7 +52,7 @@ impl Block {
             let rest_len = (&data
                 [offset_start + KEY_LEN_SIZE..offset_start + KEY_LEN_SIZE + KEY_LEN_SIZE])
                 .get_u16();
-            offset_start += KEY_LEN_SIZE + KEY_LEN_SIZE + rest_len as usize;
+            offset_start += KEY_LEN_SIZE + KEY_LEN_SIZE + rest_len as usize + 8;
             let val_len = (&data[offset_start..offset_start + VALUE_LEN_SIZE]).get_u16();
             offset_start += VALUE_LEN_SIZE + val_len as usize;
         }

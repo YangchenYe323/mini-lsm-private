@@ -12,6 +12,7 @@ use ouroboros::self_referencing;
 use crate::iterators::StorageIterator;
 use crate::key::Key;
 use crate::key::KeySlice;
+use crate::key::TS_DEFAULT;
 use crate::table::SsTableBuilder;
 use crate::wal::Wal;
 
@@ -136,7 +137,7 @@ impl MemTable {
         for entry in self.map.iter() {
             let key = entry.key();
             let value = entry.value();
-            builder.add(KeySlice::from_slice(key), value);
+            builder.add(KeySlice::from_slice(key, TS_DEFAULT), value);
         }
 
         Ok(())
@@ -183,7 +184,7 @@ impl StorageIterator for MemTableIterator {
     }
 
     fn key(&self) -> KeySlice {
-        Key::from_slice(self.borrow_item().0.as_ref())
+        Key::from_slice(self.borrow_item().0.as_ref(), TS_DEFAULT)
     }
 
     fn is_valid(&self) -> bool {

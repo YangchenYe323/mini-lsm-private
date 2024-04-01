@@ -16,7 +16,7 @@ use bytes::{Buf, BufMut};
 pub use iterator::SsTableIterator;
 
 use crate::block::Block;
-use crate::key::{KeyBytes, KeySlice};
+use crate::key::{KeyBytes, KeySlice, TS_DEFAULT};
 use crate::lsm_storage::BlockCache;
 
 use self::bloom::Bloom;
@@ -38,10 +38,12 @@ impl BlockMeta {
     pub fn encode_block_meta(block_meta: &[BlockMeta], buf: &mut Vec<u8>) {
         block_meta.iter().for_each(|meta| {
             buf.put_u32(meta.offset as u32);
-            buf.put_u32(meta.first_key.len() as u32);
-            buf.put_slice(meta.first_key.raw_ref());
-            buf.put_u32(meta.last_key.len() as u32);
-            buf.put_slice(meta.last_key.raw_ref());
+            buf.put_u32(meta.first_key.key_len() as u32);
+            buf.put_slice(meta.first_key.key_ref());
+            buf.put_u64(meta.first_key.ts());
+            buf.put_u32(meta.last_key.key_len() as u32);
+            buf.put_slice(meta.last_key.key_ref());
+            buf.put_u64(meta.last_key.ts());
         })
     }
 
@@ -52,9 +54,13 @@ impl BlockMeta {
         while buf.remaining() > 0 {
             let offset = buf.get_u32() as usize;
             let first_key_len = buf.get_u32() as usize;
-            let first_key = KeyBytes::from_bytes(buf.copy_to_bytes(first_key_len));
+            let first_key_bytes = buf.copy_to_bytes(first_key_len);
+            let first_key_ts = buf.get_u64();
+            let first_key = KeyBytes::from_bytes_with_ts(first_key_bytes, first_key_ts);
             let last_key_len = buf.get_u32() as usize;
-            let last_key = KeyBytes::from_bytes(buf.copy_to_bytes(last_key_len));
+            let last_key_bytes = buf.copy_to_bytes(last_key_len);
+            let last_key_ts = buf.get_u64();
+            let last_key = KeyBytes::from_bytes_with_ts(last_key_bytes, last_key_ts);
             res.push(BlockMeta {
                 offset,
                 first_key,
@@ -282,14 +288,14 @@ impl SsTable {
         let first_key = self.first_key.as_key_slice();
 
         let lower_out_of_bound = match lower {
-            Bound::Included(s) => KeySlice::from_slice(s) > last_key,
-            Bound::Excluded(s) => KeySlice::from_slice(s) >= last_key,
+            Bound::Included(s) => KeySlice::from_slice(s, TS_DEFAULT) > last_key,
+            Bound::Excluded(s) => KeySlice::from_slice(s, TS_DEFAULT) >= last_key,
             Bound::Unbounded => false,
         };
 
         let upper_out_of_bound = match upper {
-            Bound::Included(s) => KeySlice::from_slice(s) < first_key,
-            Bound::Excluded(s) => KeySlice::from_slice(s) <= first_key,
+            Bound::Included(s) => KeySlice::from_slice(s, TS_DEFAULT) < first_key,
+            Bound::Excluded(s) => KeySlice::from_slice(s, TS_DEFAULT) <= first_key,
             Bound::Unbounded => false,
         };
 

@@ -129,8 +129,10 @@ impl BlockIterator {
     fn first_key(block: &Block, offset: usize) -> KeyVec {
         let mut buffer = &block.data[offset..];
         let key_len = buffer.get_u16() as usize;
-        let key = KeySlice::from_slice(&buffer[..key_len]);
-        key.to_key_vec()
+        let key = &buffer[..key_len];
+        buffer.advance(key_len);
+        let timestamp = buffer.get_u64();
+        KeyVec::from_vec_with_ts(key.to_vec(), timestamp)
     }
 
     fn subsequent_key(block: &Block, offset: usize, first_key: KeySlice) -> KeyVec {
@@ -139,9 +141,11 @@ impl BlockIterator {
         let prefix_len = buffer.get_u16() as usize;
         let rest_len = buffer.get_u16() as usize;
         let rest = &buffer[..rest_len];
-        key.extend(&first_key.raw_ref()[..prefix_len]);
+        buffer.advance(rest_len);
+        let timestamp = buffer.get_u64();
+        key.extend(&first_key.key_ref()[..prefix_len]);
         key.extend(rest);
-        KeyVec::from_vec(key)
+        KeyVec::from_vec_with_ts(key, timestamp)
     }
 
     fn value_at_offset(&self, offset: usize) -> &[u8] {
@@ -149,11 +153,11 @@ impl BlockIterator {
 
         let mut value_buffer = if offset == self.first_offset {
             let key_len = buffer.get_u16() as usize;
-            &buffer[key_len..]
+            &buffer[key_len + 8..]
         } else {
             let _ = buffer.get_u16();
             let rest_len = buffer.get_u16() as usize;
-            &buffer[rest_len..]
+            &buffer[rest_len + 8..]
         };
 
         let val_len = value_buffer.get_u16() as usize;

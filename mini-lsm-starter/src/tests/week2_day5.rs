@@ -103,7 +103,7 @@ fn test_multiple_compacted_ssts_leveled() {
         let mut iterator = SsTableIterator::create_and_seek_to_first(table).unwrap();
         let mut keys = vec![];
         while iterator.is_valid() {
-            let key = iterator.key().raw_ref();
+            let key = iterator.key().for_testing_key_ref();
             let mut buf = &key[key.len() - 4..];
             let key = buf.get_i32();
             keys.push(key);

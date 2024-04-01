@@ -46,8 +46,8 @@ impl LeveledCompactionController {
                     let first_key = other.first_key();
                     let last_key = other.last_key();
 
-                    let lower = std::ops::Bound::Included(first_key.as_key_slice().raw_ref());
-                    let upper = std::ops::Bound::Included(last_key.as_key_slice().raw_ref());
+                    let lower = std::ops::Bound::Included(first_key.as_key_slice().key_ref());
+                    let upper = std::ops::Bound::Included(last_key.as_key_slice().key_ref());
 
                     if table.range_overlap(lower, upper) {
                         return true;
