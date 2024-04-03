@@ -273,13 +273,14 @@ impl LsmStorageInner {
 
         let mut current_builder = SsTableBuilder::new(block_size);
 
+        let mut prev_key = Vec::new();
         while iterator.is_valid() {
-            if !iterator.value().is_empty() {
-                if current_builder.estimated_size() >= sst_size {
-                    self.finish_current_table(&mut current_builder, &mut res)?;
-                }
-                current_builder.add(iterator.key(), iterator.value());
+            if current_builder.estimated_size() >= sst_size && iterator.key().key_ref() != prev_key
+            {
+                self.finish_current_table(&mut current_builder, &mut res)?;
             }
+            prev_key = iterator.key().key_ref().to_vec();
+            current_builder.add(iterator.key(), iterator.value());
             iterator.next()?;
         }
 

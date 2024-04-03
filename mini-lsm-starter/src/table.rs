@@ -16,7 +16,7 @@ use bytes::{Buf, BufMut};
 pub use iterator::SsTableIterator;
 
 use crate::block::Block;
-use crate::key::{KeyBytes, KeySlice, TS_DEFAULT};
+use crate::key::{KeyBytes, KeySlice};
 use crate::lsm_storage::BlockCache;
 
 use self::bloom::Bloom;
@@ -283,19 +283,19 @@ impl SsTable {
         self.max_ts
     }
 
-    pub fn range_overlap(&self, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> bool {
+    pub fn range_overlap(&self, lower: Bound<KeySlice>, upper: Bound<KeySlice>) -> bool {
         let last_key = self.last_key.as_key_slice();
         let first_key = self.first_key.as_key_slice();
 
         let lower_out_of_bound = match lower {
-            Bound::Included(s) => KeySlice::from_slice(s, TS_DEFAULT) > last_key,
-            Bound::Excluded(s) => KeySlice::from_slice(s, TS_DEFAULT) >= last_key,
+            Bound::Included(s) => s > last_key,
+            Bound::Excluded(s) => s >= last_key,
             Bound::Unbounded => false,
         };
 
         let upper_out_of_bound = match upper {
-            Bound::Included(s) => KeySlice::from_slice(s, TS_DEFAULT) < first_key,
-            Bound::Excluded(s) => KeySlice::from_slice(s, TS_DEFAULT) <= first_key,
+            Bound::Included(s) => s < first_key,
+            Bound::Excluded(s) => s <= first_key,
             Bound::Unbounded => false,
         };
 

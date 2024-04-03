@@ -10,6 +10,8 @@ use bytes::{Buf, BufMut, Bytes};
 use crossbeam_skiplist::SkipMap;
 use parking_lot::Mutex;
 
+use crate::key::{KeyBytes, KeySlice};
+
 pub struct Wal {
     file: Arc<Mutex<BufWriter<File>>>,
 }
@@ -22,13 +24,14 @@ impl Wal {
         })
     }
 
-    pub fn recover(path: impl AsRef<Path>, skiplist: &SkipMap<Bytes, Bytes>) -> Result<Self> {
+    pub fn recover(path: impl AsRef<Path>, skiplist: &SkipMap<KeyBytes, Bytes>) -> Result<Self> {
         let content = std::fs::read(path.as_ref())?;
         let mut buf = &content[..];
         while buf.remaining() > 0 {
             let old_buf = buf;
             let key_len = buf.get_u32();
             let key = buf.copy_to_bytes(key_len as usize);
+            let key_ts = buf.get_u64();
             let value_len = buf.get_u32();
             let value = buf.copy_to_bytes(value_len as usize);
             let checksum = buf.get_u32();
@@ -38,7 +41,7 @@ impl Wal {
                 "WAL checksum mismatch: {} != {}",
                 checksum, actual_checksum
             );
-            skiplist.insert(key, value);
+            skiplist.insert(KeyBytes::from_bytes_with_ts(key, key_ts), value);
         }
 
         let mut file = File::open(path.as_ref())?;
@@ -48,10 +51,12 @@ impl Wal {
         })
     }
 
-    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        let mut buf = Vec::with_capacity(4 + key.len() + 4 + value.len());
-        buf.put_u32(key.len() as u32);
-        buf.put_slice(key);
+    pub fn put(&self, key: KeySlice, value: &[u8]) -> Result<()> {
+        let mut buf = Vec::with_capacity(4 + key.raw_len() + 4 + value.len());
+        buf.put_u32(key.key_len() as u32);
+        buf.put_slice(key.key_ref());
+        buf.put_u64(key.ts());
+
         buf.put_u32(value.len() as u32);
         buf.put_slice(value);
         let checksum = crc32fast::hash(&buf);
