@@ -154,15 +154,25 @@ impl SsTable {
         );
         let bloom = Bloom::decode(bloom_data_buffer)?;
 
+        // Read largest ts
+        let largest_ts_buffer = file.read(
+            bloom_offset - std::mem::size_of::<u64>() as u64,
+            std::mem::size_of::<u64>() as u64,
+        )?;
+        let largest_ts = (&largest_ts_buffer[..]).get_u64();
+
         // Step 2: Read block meta
         let block_meta_offset = file.read(
-            bloom_offset - std::mem::size_of::<u32>() as u64,
+            bloom_offset - std::mem::size_of::<u64>() as u64 - std::mem::size_of::<u32>() as u64,
             std::mem::size_of::<u32>() as u64,
         )?;
         let block_meta_offset = block_meta_offset.as_slice().get_u32() as u64;
         let block_meta_buffer = file.read(
             block_meta_offset,
-            bloom_offset - block_meta_offset - std::mem::size_of::<u32>() as u64,
+            bloom_offset
+                - block_meta_offset
+                - std::mem::size_of::<u64>() as u64
+                - std::mem::size_of::<u32>() as u64,
         )?;
         let (block_meta_data_buffer, mut block_meta_checksum_buffer) =
             block_meta_buffer.split_at(block_meta_buffer.len() - 4);
@@ -186,7 +196,7 @@ impl SsTable {
             first_key,
             last_key,
             bloom: Some(bloom),
-            max_ts: u64::MAX,
+            max_ts: largest_ts,
         })
     }
 

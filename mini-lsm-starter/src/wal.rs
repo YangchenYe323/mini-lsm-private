@@ -35,7 +35,7 @@ impl Wal {
             let value_len = buf.get_u32();
             let value = buf.copy_to_bytes(value_len as usize);
             let checksum = buf.get_u32();
-            let actual_checksum = crc32fast::hash(&old_buf[..(key_len + value_len + 8) as usize]);
+            let actual_checksum = crc32fast::hash(&old_buf[..(key_len + value_len + 16) as usize]);
             assert_eq!(
                 checksum, actual_checksum,
                 "WAL checksum mismatch: {} != {}",

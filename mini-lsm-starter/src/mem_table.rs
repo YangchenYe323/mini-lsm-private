@@ -29,6 +29,14 @@ pub struct MemTable {
     approximate_size: Arc<AtomicUsize>,
 }
 
+pub(crate) fn map_bytes_bound(bound: Bound<&[u8]>) -> Bound<Bytes> {
+    match bound {
+        Bound::Included(x) => Bound::Included(Bytes::copy_from_slice(x)),
+        Bound::Excluded(x) => Bound::Excluded(Bytes::copy_from_slice(x)),
+        Bound::Unbounded => Bound::Unbounded,
+    }
+}
+
 /// Create a bound of `Bytes` from a bound of `KeySlice`.
 pub(crate) fn map_bound(bound: Bound<KeySlice>) -> Bound<KeyBytes> {
     match bound {

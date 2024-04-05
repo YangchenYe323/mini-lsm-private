@@ -10,7 +10,7 @@ use bytes::{BufMut, Bytes};
 use super::{bloom::Bloom, BlockMeta, SsTable};
 use crate::{
     block::BlockBuilder,
-    key::{KeyBytes, KeySlice, TS_DEFAULT},
+    key::{KeyBytes, KeySlice, TS_DEFAULT, TS_MIN},
     lsm_storage::BlockCache,
     table::FileObject,
 };
@@ -26,6 +26,7 @@ pub struct SsTableBuilder {
     pub(crate) meta: Vec<BlockMeta>,
     block_size: usize,
     key_hashes: Vec<u32>,
+    largest_ts: u64,
 }
 
 impl SsTableBuilder {
@@ -41,6 +42,7 @@ impl SsTableBuilder {
             meta: Vec::new(),
             block_size,
             key_hashes: Vec::new(),
+            largest_ts: TS_MIN,
         }
     }
 
@@ -76,6 +78,7 @@ impl SsTableBuilder {
             }
             self.last_key = key.key_ref().to_vec();
             self.last_timestamp = key.ts();
+            self.largest_ts = self.largest_ts.max(key.ts());
         }
 
         added_to_cur_block
@@ -132,6 +135,7 @@ impl SsTableBuilder {
             meta,
             block_size,
             key_hashes,
+            largest_ts,
         } = self;
 
         // Build bloom filter
@@ -150,6 +154,8 @@ impl SsTableBuilder {
         let meta_checksum = crc32fast::hash(meta_buffer);
         buffer.put_u32(meta_checksum);
         buffer.put_u32(meta_offset as u32);
+        // Encode lagrest ts after block metadata
+        buffer.put_u64(largest_ts);
 
         // Step 3: Encode bloom filter
         let bloom_offset = buffer.len();
@@ -172,6 +178,7 @@ impl SsTableBuilder {
         table.block_meta = meta;
         table.block_meta_offset = meta_offset;
         table.bloom = Some(bloom);
+        table.max_ts = largest_ts;
 
         Ok(table)
     }

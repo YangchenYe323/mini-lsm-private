@@ -1,7 +1,6 @@
 use std::ops::Bound;
 
 use anyhow::{anyhow, Result};
-
 use crate::{
     iterators::{
         concat_iterator::SstConcatIterator, merge_iterator::MergeIterator,
@@ -24,10 +23,16 @@ pub struct LsmIterator {
     current_value: Vec<u8>,
     // value upper bound
     upper: Bound<KeyBytes>,
+    // read timestamp
+    read_ts: u64,
 }
 
 impl LsmIterator {
-    pub(crate) fn new(iter: LsmIteratorInner, upper: Bound<KeySlice>) -> Result<Self> {
+    pub(crate) fn new(
+        iter: LsmIteratorInner,
+        upper: Bound<KeySlice>,
+        read_ts: u64,
+    ) -> Result<Self> {
         let upper = map_bound(upper);
 
         let mut it = Self {
@@ -35,19 +40,36 @@ impl LsmIterator {
             current_key: KeyVec::new(),
             current_value: Vec::new(),
             upper,
+            read_ts,
         };
 
         it.fetch_current();
-        it.skip_older_version()?;
-        if it.value().is_empty() {
+        it.move_to_right_version_and_skip_older()?;
+        if it.value().is_empty() || it.current_key.ts() > it.read_ts {
             it.next()?;
         }
 
         Ok(it)
     }
 
-    fn skip_older_version(&mut self) -> Result<()> {
+    /// Start position:
+    /// key0 ts1 | key0 ts2 | key0 ts3 | key0 ts4 | key1 ts1
+    /// --------
+    /// current/inner
+    /// Move inner to the start of the next key (key1 ts1)
+    /// and move current to the key with the biggest ts smaller than or equal to the read_ts
+    ///
+    /// Note that it is possible that after the procedure, the iterator is left at the state
+    /// key0 ts1 | key0 ts2 | key0 ts3 | key0 ts4 | key1 ts1
+    /// --------                                    --------
+    ///  current                                      inner
+    /// because every entry of key0 is added after the read timestamp.
+    /// In this case we should proceed to key1
+    fn move_to_right_version_and_skip_older(&mut self) -> Result<()> {
         while self.inner.is_valid() && self.inner.key().key_ref() == self.current_key.key_ref() {
+            if self.current_key.ts() >= self.read_ts && self.inner.key().ts() < self.read_ts {
+                self.fetch_current();
+            }
             self.inner.next()?;
         }
         Ok(())
@@ -93,8 +115,8 @@ impl StorageIterator for LsmIterator {
 
         while self.inner.is_valid() {
             self.fetch_current();
-            self.skip_older_version()?;
-            if !self.value().is_empty() {
+            self.move_to_right_version_and_skip_older()?;
+            if !self.value().is_empty() && self.current_key.ts() <= self.read_ts {
                 break;
             }
             if !self.inner.is_valid() {
