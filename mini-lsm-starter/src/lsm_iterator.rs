@@ -1,6 +1,5 @@
 use std::ops::Bound;
 
-use anyhow::{anyhow, Result};
 use crate::{
     iterators::{
         concat_iterator::SstConcatIterator, merge_iterator::MergeIterator,
@@ -10,6 +9,7 @@ use crate::{
     mem_table::{map_bound, MemTableIterator},
     table::SsTableIterator,
 };
+use anyhow::{anyhow, Result};
 
 /// Represents the internal type for an LSM iterator. This type will be changed across the tutorial for multiple times.
 type LsmIteratorInner = TwoMergeIterator<
