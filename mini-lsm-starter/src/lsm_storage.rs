@@ -526,6 +526,10 @@ impl LsmStorageInner {
         Self::path_of_wal_static(&self.path, id)
     }
 
+    pub(crate) fn mvcc(&self) -> &LsmMvccInner {
+        self.mvcc.as_ref().unwrap()
+    }
+
     pub(super) fn sync_dir(&self) -> Result<()> {
         File::open(&self.path)?.sync_all()?;
         Ok(())

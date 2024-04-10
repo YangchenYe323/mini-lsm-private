@@ -20,7 +20,7 @@ use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::iterators::StorageIterator;
-use crate::key::KeySlice;
+use crate::key::{KeySlice, KeyVec};
 use crate::lsm_storage::{LsmStorageInner, LsmStorageState};
 use crate::manifest::ManifestRecord;
 use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
@@ -139,7 +139,7 @@ impl LsmStorageInner {
                     &task.upper_level_sst_ids,
                     &task.lower_level_sst_ids,
                 )?;
-                self.compact_inner(iter)
+                self.compact_inner(iter, task.is_lower_level_bottom_level)
             }
             None => {
                 let iter = Self::build_l0_and_l1_iter(
@@ -147,7 +147,7 @@ impl LsmStorageInner {
                     &task.upper_level_sst_ids,
                     &task.lower_level_sst_ids,
                 )?;
-                self.compact_inner(iter)
+                self.compact_inner(iter, task.is_lower_level_bottom_level)
             }
         }
     }
@@ -171,7 +171,7 @@ impl LsmStorageInner {
 
         let merge_iter = MergeIterator::create(iters);
 
-        self.compact_inner(merge_iter)
+        self.compact_inner(merge_iter, task.bottom_tier_included)
     }
 
     fn compact_simple(&self, task: &SimpleLeveledCompactionTask) -> Result<Vec<Arc<SsTable>>> {
@@ -187,7 +187,7 @@ impl LsmStorageInner {
                     &task.upper_level_sst_ids,
                     &task.lower_level_sst_ids,
                 )?;
-                self.compact_inner(iter)
+                self.compact_inner(iter, task.is_lower_level_bottom_level)
             }
             None => {
                 let iter = Self::build_l0_and_l1_iter(
@@ -195,7 +195,7 @@ impl LsmStorageInner {
                     &task.upper_level_sst_ids,
                     &task.lower_level_sst_ids,
                 )?;
-                self.compact_inner(iter)
+                self.compact_inner(iter, task.is_lower_level_bottom_level)
             }
         }
     }
@@ -212,7 +212,7 @@ impl LsmStorageInner {
 
         let iter = Self::build_l0_and_l1_iter(&snapshot, l0_sstables, l1_sstables)?;
 
-        self.compact_inner(iter)
+        self.compact_inner(iter, true)
     }
 
     fn build_l0_and_l1_iter(
@@ -265,7 +265,10 @@ impl LsmStorageInner {
     fn compact_inner<I: for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>>(
         &self,
         mut iterator: I,
+        merge_to_bottom: bool,
     ) -> Result<Vec<Arc<SsTable>>> {
+        let watermark = self.mvcc().watermark();
+
         let mut res = Vec::new();
 
         let sst_size = self.options.target_sst_size;
@@ -273,14 +276,36 @@ impl LsmStorageInner {
 
         let mut current_builder = SsTableBuilder::new(block_size);
 
-        let mut prev_key = Vec::new();
+        let mut prev_key = KeyVec::new();
         while iterator.is_valid() {
-            if current_builder.estimated_size() >= sst_size && iterator.key().key_ref() != prev_key
+            let current_key = iterator.key();
+            // Skip the key if:
+            // a. the key's timestamp is smaller or equal than the watermark and
+            // b. there exists a key with bigger timestanmp smaller or equal than the watermark
+            let current_ts = current_key.ts();
+            let prev_ts = prev_key.ts();
+            if current_ts < watermark
+                && prev_key.key_ref() == current_key.key_ref()
+                && prev_ts < watermark
+                && prev_ts > current_key.ts()
+            {
+                iterator.next()?;
+                continue;
+            }
+
+            if current_builder.estimated_size() >= sst_size
+                && iterator.key().key_ref() != prev_key.key_ref()
             {
                 self.finish_current_table(&mut current_builder, &mut res)?;
             }
-            prev_key = iterator.key().key_ref().to_vec();
-            current_builder.add(iterator.key(), iterator.value());
+            prev_key = iterator.key().to_key_vec();
+
+            let should_add = iterator.key().ts() >= watermark
+                || !(merge_to_bottom && iterator.value().is_empty());
+            if should_add {
+                current_builder.add(iterator.key(), iterator.value());
+            }
+
             iterator.next()?;
         }
 
