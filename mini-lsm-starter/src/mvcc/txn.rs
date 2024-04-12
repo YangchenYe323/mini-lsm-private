@@ -16,7 +16,7 @@ use parking_lot::Mutex;
 use crate::{
     iterators::{two_merge_iterator::TwoMergeIterator, StorageIterator},
     lsm_iterator::{FusedIterator, LsmIterator},
-    lsm_storage::LsmStorageInner,
+    lsm_storage::{LsmStorageInner, WriteBatchRecord},
     mem_table::map_bytes_bound,
 };
 
@@ -31,10 +31,20 @@ pub struct Transaction {
 
 impl Transaction {
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
+        self.abort_if_committed();
+
+        if let Some(entry) = self.local_storage.get(key) {
+            if entry.value().is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(Bytes::copy_from_slice(entry.value())));
+        }
         self.inner.get_with_ts(key, self.read_ts)
     }
 
     pub fn scan(self: &Arc<Self>, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> Result<TxnIterator> {
+        self.abort_if_committed();
+
         let lsm_iter = self.inner.scan_with_ts(lower, upper, self.read_ts)?;
         let mut local_iter = TxnLocalIterator::new(
             Arc::clone(&self.local_storage),
@@ -49,15 +59,42 @@ impl Transaction {
     }
 
     pub fn put(&self, key: &[u8], value: &[u8]) {
-        unimplemented!()
+        self.abort_if_committed();
+
+        self.local_storage
+            .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
     }
 
     pub fn delete(&self, key: &[u8]) {
-        unimplemented!()
+        self.abort_if_committed();
+
+        self.local_storage
+            .insert(Bytes::copy_from_slice(key), Bytes::from_static(&[]));
     }
 
     pub fn commit(&self) -> Result<()> {
-        unimplemented!()
+        self.committed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let record_batch: Vec<WriteBatchRecord<Bytes>> = self
+            .local_storage
+            .iter()
+            .map(|entry| {
+                if entry.value().is_empty() {
+                    return WriteBatchRecord::Del(entry.key().clone());
+                }
+
+                WriteBatchRecord::Put(entry.key().clone(), entry.value().clone())
+            })
+            .collect();
+
+        self.inner.write_batch(&record_batch)
+    }
+
+    fn abort_if_committed(&self) {
+        assert!(
+            !self.committed.load(std::sync::atomic::Ordering::Relaxed),
+            "Could not perform operation on committed transactions"
+        );
     }
 }
 
@@ -87,11 +124,11 @@ impl StorageIterator for TxnLocalIterator {
     type KeyType<'a> = &'a [u8];
 
     fn value(&self) -> &[u8] {
-        &self.borrow_item().0
+        &self.borrow_item().1
     }
 
     fn key(&self) -> &[u8] {
-        &self.borrow_item().1
+        &self.borrow_item().0
     }
 
     fn is_valid(&self) -> bool {
@@ -144,7 +181,13 @@ impl StorageIterator for TxnIterator {
     }
 
     fn next(&mut self) -> Result<()> {
-        self.iter.next()
+        self.iter.next()?;
+        // Skip deleted entries. This is necessary as TxnLocalIterators will return
+        // deletion tombstones even if LsmIterator has its internal deletion handling
+        while self.iter.is_valid() && self.iter.value().is_empty() {
+            self.iter.next()?;
+        }
+        Ok(())
     }
 
     fn num_active_iterators(&self) -> usize {

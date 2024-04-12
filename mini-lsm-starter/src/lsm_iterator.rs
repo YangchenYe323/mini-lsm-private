@@ -45,7 +45,7 @@ impl LsmIterator {
 
         it.fetch_current();
         it.move_to_right_version_and_skip_older()?;
-        if it.value().is_empty() || it.current_key.ts() > it.read_ts {
+        if it.value().is_empty() || it.current_key.ts() >= it.read_ts {
             it.next()?;
         }
 
