@@ -210,6 +210,22 @@ impl MiniLsm {
     }
 
     pub fn write_batch<T: AsRef<[u8]>>(&self, batch: &[WriteBatchRecord<T>]) -> Result<()> {
+        if self.inner.options.serializable {
+            let txn = self.new_txn()?;
+            for record in batch {
+                match record {
+                    WriteBatchRecord::Put(k, v) => {
+                        txn.put(k.as_ref(), v.as_ref());
+                    }
+                    WriteBatchRecord::Del(k) => {
+                        txn.delete(k.as_ref());
+                    }
+                }
+            }
+            txn.commit()?;
+            return Ok(());
+        }
+
         self.inner.write_batch(batch)
     }
 
@@ -222,10 +238,24 @@ impl MiniLsm {
     }
 
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        if self.inner.options.serializable {
+            let txn = self.new_txn()?;
+            txn.put(key, value);
+            txn.commit()?;
+            return Ok(());
+        }
+
         self.inner.put(key, value)
     }
 
     pub fn delete(&self, key: &[u8]) -> Result<()> {
+        if self.inner.options.serializable {
+            let txn = self.new_txn()?;
+            txn.delete(key);
+            txn.commit()?;
+            return Ok(());
+        }
+
         self.inner.delete(key)
     }
 
@@ -421,7 +451,7 @@ impl LsmStorageInner {
 
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
     pub fn get(self: &Arc<Self>, key: &[u8]) -> Result<Option<Bytes>> {
-        let txn = self.mvcc.as_ref().unwrap().new_txn(Arc::clone(self), false);
+        let txn = self.new_txn()?;
         txn.get(key)
     }
 
@@ -484,6 +514,48 @@ impl LsmStorageInner {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn write_batch_inner<T: AsRef<[u8]>>(
+        &self,
+        batch: &[WriteBatchRecord<T>],
+    ) -> Result<u64> {
+        let ts = if let Some(mvcc) = &self.mvcc {
+            mvcc.latest_commit_ts() + 1
+        } else {
+            TS_DEFAULT
+        };
+
+        for record in batch {
+            match record {
+                WriteBatchRecord::Put(key, value) => {
+                    let size = {
+                        let guard = self.state.write();
+                        let _ = guard
+                            .memtable
+                            .put(KeySlice::from_slice(key.as_ref(), ts), value.as_ref());
+                        guard.memtable.approximate_size()
+                    };
+                    self.try_freeze(size)?;
+                }
+                WriteBatchRecord::Del(key) => {
+                    let size = {
+                        let guard = self.state.write();
+                        let _ = guard
+                            .memtable
+                            .put(KeySlice::from_slice(key.as_ref(), ts), &[]);
+                        guard.memtable.approximate_size()
+                    };
+                    self.try_freeze(size)?;
+                }
+            }
+        }
+
+        if let Some(mvcc) = &self.mvcc {
+            mvcc.update_commit_ts(ts);
+        }
+
+        Ok(ts)
     }
 
     /// Put a key-value pair into the storage by writing into the current memtable.
@@ -626,12 +698,16 @@ impl LsmStorageInner {
     }
 
     pub fn new_txn(self: &Arc<Self>) -> Result<Arc<Transaction>> {
-        Ok(self.mvcc.as_ref().unwrap().new_txn(Arc::clone(self), false))
+        Ok(self
+            .mvcc
+            .as_ref()
+            .unwrap()
+            .new_txn(Arc::clone(self), self.options.serializable))
     }
 
     /// Create an iterator over a range of keys.
     pub fn scan(self: &Arc<Self>, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> Result<TxnIterator> {
-        let txn = self.mvcc.as_ref().unwrap().new_txn(Arc::clone(self), false);
+        let txn = self.new_txn()?;
         txn.scan(lower, upper)
     }
 

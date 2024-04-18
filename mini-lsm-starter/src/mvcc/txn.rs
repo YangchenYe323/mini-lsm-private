@@ -7,11 +7,11 @@ use std::{
     sync::{atomic::AtomicBool, Arc},
 };
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
 use ouroboros::self_referencing;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard};
 
 use crate::{
     iterators::{two_merge_iterator::TwoMergeIterator, StorageIterator},
@@ -19,6 +19,8 @@ use crate::{
     lsm_storage::{LsmStorageInner, WriteBatchRecord},
     mem_table::map_bytes_bound,
 };
+
+use super::CommittedTxnData;
 
 pub struct Transaction {
     pub(crate) read_ts: u64,
@@ -32,6 +34,11 @@ pub struct Transaction {
 impl Transaction {
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         self.abort_if_committed();
+
+        if let Some(key_hashes) = &self.key_hashes {
+            let mut guard = key_hashes.lock();
+            guard.1.insert(farmhash::hash32(key));
+        }
 
         if let Some(entry) = self.local_storage.get(key) {
             if entry.value().is_empty() {
@@ -61,6 +68,11 @@ impl Transaction {
     pub fn put(&self, key: &[u8], value: &[u8]) {
         self.abort_if_committed();
 
+        if let Some(key_hashes) = &self.key_hashes {
+            let mut guard = key_hashes.lock();
+            guard.0.insert(farmhash::hash32(key));
+        }
+
         self.local_storage
             .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
     }
@@ -68,11 +80,19 @@ impl Transaction {
     pub fn delete(&self, key: &[u8]) {
         self.abort_if_committed();
 
+        if let Some(key_hashes) = &self.key_hashes {
+            let mut guard = key_hashes.lock();
+            guard.0.insert(farmhash::hash32(key));
+        }
+
         self.local_storage
             .insert(Bytes::copy_from_slice(key), Bytes::from_static(&[]));
     }
 
     pub fn commit(&self) -> Result<()> {
+        let commit_lock = self.inner.mvcc().commit_lock.lock();
+        self.validate_commit(&commit_lock)?;
+
         self.committed
             .store(true, std::sync::atomic::Ordering::Relaxed);
         let record_batch: Vec<WriteBatchRecord<Bytes>> = self
@@ -87,7 +107,64 @@ impl Transaction {
             })
             .collect();
 
-        self.inner.write_batch(&record_batch)
+        let commit_ts = self.inner.write_batch_inner(&record_batch)?;
+
+        if let Some(key_hashes) = &self.key_hashes {
+            let commit_data = CommittedTxnData {
+                key_hashes: key_hashes.lock().0.clone(),
+                read_ts: self.read_ts,
+                commit_ts,
+            };
+
+            let mut committed_txns = self.inner.mvcc().committed_txns.lock();
+            committed_txns.insert(commit_ts, commit_data);
+
+            // Remove txns below the watermark
+            for ts in committed_txns.keys().copied().collect::<Vec<_>>() {
+                if ts < self.inner.mvcc().watermark() {
+                    committed_txns.remove(&ts);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_commit(&self, _commit_lock: &MutexGuard<()>) -> Result<()> {
+        let Some(key_hashes) = &self.key_hashes else {
+            return Ok(());
+        };
+
+        let guard = key_hashes.lock();
+
+        if guard.0.is_empty() {
+            // read-only txns
+            return Ok(());
+        }
+
+        let txn_start_ts = self.read_ts;
+        let expected_commit_ts = self.inner.mvcc().latest_commit_ts() + 1;
+
+        let commited_txns = self.inner.mvcc().committed_txns.lock();
+        let earlier_txns = commited_txns.range((
+            Bound::Included(txn_start_ts),
+            Bound::Excluded(expected_commit_ts),
+        ));
+
+        for (_, earlier_txn) in earlier_txns {
+            println!("{:?}", earlier_txn.key_hashes);
+            // Abort if earlier-txn's write set intersects with our read set
+            if earlier_txn
+                .key_hashes
+                .intersection(&guard.1)
+                .next()
+                .is_some()
+            {
+                return Err(anyhow!("Abort transaction"));
+            }
+        }
+
+        Ok(())
     }
 
     fn abort_if_committed(&self) {
@@ -152,7 +229,7 @@ impl StorageIterator for TxnLocalIterator {
 }
 
 pub struct TxnIterator {
-    _txn: Arc<Transaction>,
+    txn: Arc<Transaction>,
     iter: TwoMergeIterator<TxnLocalIterator, FusedIterator<LsmIterator>>,
 }
 
@@ -161,7 +238,7 @@ impl TxnIterator {
         txn: Arc<Transaction>,
         iter: TwoMergeIterator<TxnLocalIterator, FusedIterator<LsmIterator>>,
     ) -> Result<Self> {
-        Ok(Self { _txn: txn, iter })
+        Ok(Self { txn, iter })
     }
 }
 
@@ -181,12 +258,18 @@ impl StorageIterator for TxnIterator {
     }
 
     fn next(&mut self) -> Result<()> {
+        if let Some(key_hashes) = &self.txn.key_hashes {
+            let mut guard = key_hashes.lock();
+            guard.1.insert(farmhash::hash32(self.iter.key()));
+        }
+
         self.iter.next()?;
         // Skip deleted entries. This is necessary as TxnLocalIterators will return
         // deletion tombstones even if LsmIterator has its internal deletion handling
         while self.iter.is_valid() && self.iter.value().is_empty() {
             self.iter.next()?;
         }
+
         Ok(())
     }
 
