@@ -4,6 +4,7 @@ mod leveled;
 mod simple_leveled;
 mod tiered;
 
+use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,6 +22,7 @@ use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::iterators::StorageIterator;
 use crate::key::{KeySlice, KeyVec};
+use crate::lsm_storage::CompactionFilter::Prefix;
 use crate::lsm_storage::{LsmStorageInner, LsmStorageState};
 use crate::manifest::ManifestRecord;
 use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
@@ -302,7 +304,11 @@ impl LsmStorageInner {
 
             let should_add = iterator.key().ts() >= watermark
                 || !(merge_to_bottom && iterator.value().is_empty());
-            if should_add {
+
+            let filtered = iterator.key().ts() < watermark
+                && self.check_compaction_filter(iterator.key().key_ref());
+
+            if should_add && !filtered {
                 current_builder.add(iterator.key(), iterator.value());
             }
 
@@ -314,6 +320,21 @@ impl LsmStorageInner {
         }
 
         Ok(res)
+    }
+
+    fn check_compaction_filter(&self, key: &[u8]) -> bool {
+        let guard = self.compaction_filters.lock();
+        for filter in guard.deref().iter() {
+            match filter {
+                Prefix(prefix) => {
+                    if key.starts_with(prefix) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
     }
 
     fn finish_current_table(
